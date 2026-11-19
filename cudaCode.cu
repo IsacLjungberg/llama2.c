@@ -13,6 +13,7 @@
     }                                                    \
 } while (0)
 
+//
 __global__ void gpu_matmul(float* xout, float* x, float* w, int n, int d) {
 	int insertPos = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -40,21 +41,30 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
 }
 */
 
-extern "C" void cuda_matmul(float* xout, float* x, float* w, int n, int d) {
+extern "C" float* cuda_upload_matrix(float* matrixPointer, size_t byteSize){
+    float* gpuPointer;
+    CHECK(cudaMalloc((void**)&gpuPointer, byteSize));
+    CHECK(cudaMemcpy(gpuPointer, matrixPointer, byteSize, cudaMemcpyHostToDevice));
+    return gpuPointer;
+}
+
+extern "C" void cuda_free_matrix(float* gpuPointer){
+    CHECK(cudaFree((void**)&gpuPointer));
+}
+
+//xout and x are still cpu pointers, but instead of w we now have gpu_w passed directly
+// as a gpu pointer
+extern "C" void cuda_matmul(float* xout, float* x, float* gpu_w, int n, int d) {
     const int threadsPerBlock[1] = { 256 };
 
     const int outputVectorSize = d * sizeof(float);
-	const int matrixSize = n * d * sizeof(float);
 	const int inputVectorSize = n * sizeof(float);
 
-    float* gpu_out, * gpu_x, * gpu_w;
+    float* gpu_out, * gpu_x;
     CHECK(cudaMalloc((void**)&gpu_out, outputVectorSize));
 	CHECK(cudaMalloc((void**)&gpu_x, inputVectorSize));
-	CHECK(cudaMalloc((void**)&gpu_w, matrixSize));
 
     CHECK(cudaMemcpy(gpu_x, x, inputVectorSize,
-		cudaMemcpyHostToDevice));
-	CHECK(cudaMemcpy(gpu_w, w, matrixSize,
 		cudaMemcpyHostToDevice));
 
     dim3 grid( ( (d + threadsPerBlock[0] - 1) / threadsPerBlock[0] ));
@@ -66,5 +76,5 @@ extern "C" void cuda_matmul(float* xout, float* x, float* w, int n, int d) {
 
     CHECK(cudaMemcpy(xout, gpu_out, outputVectorSize, cudaMemcpyDeviceToHost));
 
-    CHECK(cudaFree(gpu_x)); CHECK(cudaFree(gpu_w)); CHECK(cudaFree(gpu_out));
+    CHECK(cudaFree(gpu_x)); CHECK(cudaFree(gpu_out));
 }

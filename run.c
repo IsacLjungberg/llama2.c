@@ -46,6 +46,33 @@ typedef struct {
     // (optional) classifier weights for the logits, on the last layer
     float* wcls;
 } TransformerWeights;
+    
+typedef struct{
+    float* cpuPointer;
+    float* gpuPointer;
+    size_t byteSize;
+} SmartWeight;
+
+typedef struct {
+    // token embedding table
+    SmartWeight token_embedding_table;    // (vocab_size, dim)
+    // weights for rmsnorms
+    SmartWeight rms_att_weight; // (layer, dim) rmsnorm weights
+    SmartWeight rms_ffn_weight; // (layer, dim)
+    // weights for matmuls. note dim == n_heads * head_size
+    SmartWeight wq; // (layer, dim, n_heads * head_size)
+    SmartWeight wk; // (layer, dim, n_kv_heads * head_size)
+    SmartWeight wv; // (layer, dim, n_kv_heads * head_size)
+    SmartWeight wo; // (layer, n_heads * head_size, dim)
+    // weights for ffn
+    SmartWeight w1; // (layer, hidden_dim, dim)
+    SmartWeight w2; // (layer, dim, hidden_dim)
+    SmartWeight w3; // (layer, hidden_dim, dim)
+    // final rmsnorm
+    SmartWeight rms_final_weight; // (dim,)
+    // (optional) classifier weights for the logits, on the last layer
+    SmartWeight wcls;
+} SmartTransformerWeights;
 
 typedef struct {
     // current wave of activations
@@ -66,7 +93,7 @@ typedef struct {
 
 typedef struct {
     Config config; // the hyperparameters of the architecture (the blueprint)
-    TransformerWeights weights; // the weights of the model
+    SmartTransformerWeights weights; // the weights of the model
     RunState state; // buffers for the "wave" of activations in the forward pass
     // some more state needed to properly clean up the memory mapping (sigh)
     int fd; // file descriptor for memory mapping
@@ -108,38 +135,88 @@ void free_run_state(RunState* s) {
     free(s->value_cache);
 }
 
-void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared_weights) {
+float* cuda_upload_matrix(float* matrixPointer, size_t byteSize);
+
+SmartWeight make_SmartWeight(float* cpuPointer, unsigned long long floatCount){
+    SmartWeight output;
+
+    size_t byteSize = floatCount * sizeof(float);
+
+    output.cpuPointer = cpuPointer;
+    output.byteSize = byteSize;
+
+    output.gpuPointer = cuda_upload_matrix(cpuPointer, byteSize);
+
+    return output;
+}
+
+void memory_map_weights(SmartTransformerWeights *w, Config* p, float* ptr, int shared_weights) {
     int head_size = p->dim / p->n_heads;
     // make sure the multiplications below are done in 64bit to fit the parameter counts of 13B+ models
     unsigned long long n_layers = p->n_layers;
-    w->token_embedding_table = ptr;
-    ptr += p->vocab_size * p->dim;
-    w->rms_att_weight = ptr;
-    ptr += n_layers * p->dim;
-    w->wq = ptr;
-    ptr += n_layers * p->dim * (p->n_heads * head_size);
-    w->wk = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
-    w->wv = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
-    w->wo = ptr;
-    ptr += n_layers * (p->n_heads * head_size) * p->dim;
-    w->rms_ffn_weight = ptr;
-    ptr += n_layers * p->dim;
-    w->w1 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    w->w2 = ptr;
-    ptr += n_layers * p->hidden_dim * p->dim;
-    w->w3 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    w->rms_final_weight = ptr;
-    ptr += p->dim;
-    ptr += p->seq_len * head_size / 2; // skip what used to be freq_cis_real (for RoPE)
-    ptr += p->seq_len * head_size / 2; // skip what used to be freq_cis_imag (for RoPE)
-    w->wcls = shared_weights ? w->token_embedding_table : ptr;
+
+    unsigned long long count = 0;
+
+    count = p->vocab_size * p->dim;
+    w->token_embedding_table = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->dim;
+    w->rms_att_weight = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->dim * (p->n_heads * head_size);
+    w->wq = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->dim * (p->n_kv_heads * head_size);
+    w->wk = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->dim * (p->n_kv_heads * head_size);
+    w->wv = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * (p->n_heads * head_size) * p->dim;
+    w->wo = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->dim;
+    w->rms_ffn_weight = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->dim * p->hidden_dim;
+    w->w1 = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->hidden_dim * p->dim;
+    w->w2 = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = n_layers * p->dim * p->hidden_dim;
+    w->w3 = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = p->dim;
+    w->rms_final_weight = make_SmartWeight(ptr, count);
+    ptr += count;
+
+    count = p->seq_len * head_size / 2; 
+    ptr += count; // skip what used to be freq_cis_real (for RoPE)
+
+    count = p->seq_len * head_size / 2;
+    ptr += count; // skip what used to be freq_cis_imag (for RoPE)
+
+
+    if(shared_weights){
+        w->wcls = w->token_embedding_table;
+    } else {
+        count = p->vocab_size * p->dim;
+        w->wcls = make_SmartWeight(ptr, count);
+    }
 }
 
-void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
+void read_checkpoint(char* checkpoint, Config* config, SmartTransformerWeights* weights,
                      int* fd, float** data, ssize_t* file_size) {
     FILE *file = fopen(checkpoint, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", checkpoint); exit(EXIT_FAILURE); }
@@ -242,7 +319,7 @@ float* forward(Transformer* transformer, int token, int pos) {
 
     // a few convenience variables
     Config* p = &transformer->config;
-    TransformerWeights* w = &transformer->weights;
+    SmartTransformerWeights* w = &transformer->weights;
     RunState* s = &transformer->state;
     float *x = s->x;
     int dim = p->dim;
@@ -252,14 +329,14 @@ float* forward(Transformer* transformer, int token, int pos) {
     int head_size = dim / p->n_heads;
 
     // copy the token embedding into x
-    float* content_row = w->token_embedding_table + token * dim;
+    float* content_row = w->token_embedding_table.cpuPointer + token * dim;
     memcpy(x, content_row, dim*sizeof(*x));
 
     // forward all the layers
     for(unsigned long long l = 0; l < p->n_layers; l++) {
 
         // attention rmsnorm
-        rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
+        rmsnorm(s->xb, x, w->rms_att_weight.cpuPointer + l*dim, dim);
 
         // key and value point to the kv cache
         int loff = l * p->seq_len * kv_dim; // kv cache layer offset for convenience
@@ -267,9 +344,9 @@ float* forward(Transformer* transformer, int token, int pos) {
         s->v = s->value_cache + loff + pos * kv_dim;
 
         // qkv matmuls for this position
-        matmul(s->q, s->xb, w->wq + l*dim*dim, dim, dim);
-        matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
-        matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
+        matmul(s->q, s->xb, w->wq.gpuPointer + l*dim*dim, dim, dim);
+        matmul(s->k, s->xb, w->wk.gpuPointer + l*dim*kv_dim, dim, kv_dim);
+        matmul(s->v, s->xb, w->wv.gpuPointer + l*dim*kv_dim, dim, kv_dim);
 
         // RoPE relative positional encoding: complex-valued rotate q and k in each head
         for (int i = 0; i < dim; i+=2) {
@@ -329,7 +406,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         }
 
         // final matmul to get the output of the attention
-        matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
+        matmul(s->xb2, s->xb, w->wo.gpuPointer + l*dim*dim, dim, dim);
 
         // residual connection back into x
         for (int i = 0; i < dim; i++) {
@@ -337,12 +414,12 @@ float* forward(Transformer* transformer, int token, int pos) {
         }
 
         // ffn rmsnorm
-        rmsnorm(s->xb, x, w->rms_ffn_weight + l*dim, dim);
+        rmsnorm(s->xb, x, w->rms_ffn_weight.cpuPointer + l*dim, dim);
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
-        matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
+        matmul(s->hb, s->xb, w->w1.gpuPointer + l*dim*hidden_dim, dim, hidden_dim);
+        matmul(s->hb2, s->xb, w->w3.gpuPointer + l*dim*hidden_dim, dim, hidden_dim);
 
         // SwiGLU non-linearity
         for (int i = 0; i < hidden_dim; i++) {
@@ -355,7 +432,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         }
 
         // final matmul to get the output of the ffn
-        matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
+        matmul(s->xb, s->hb, w->w2.gpuPointer + l*dim*hidden_dim, hidden_dim, dim);
 
         // residual connection
         for (int i = 0; i < dim; i++) {
@@ -364,10 +441,10 @@ float* forward(Transformer* transformer, int token, int pos) {
     }
 
     // final rmsnorm
-    rmsnorm(x, x, w->rms_final_weight, dim);
+    rmsnorm(x, x, w->rms_final_weight.cpuPointer, dim);
 
     // classifier into logits
-    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+    matmul(s->logits, x, w->wcls.gpuPointer, p->dim, p->vocab_size);
     return s->logits;
 }
 
