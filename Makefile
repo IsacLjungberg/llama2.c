@@ -41,6 +41,10 @@ win64:
 	x86_64-w64-mingw32-gcc -Ofast -D_WIN32 -o run.exe -I. run.c win.c
 	x86_64-w64-mingw32-gcc -Ofast -D_WIN32 -o runq.exe -I. runq.c win.c
 
+.PHONY: wincuda
+wincuda:
+	nvcc -O3 -Xcompiler "/openmp /fp:fast" -I. -o run.exe run.c win.c cudaCode.cu
+
 # compiles with gnu99 standard flags for amazon linux, coreos, etc. compatibility
 .PHONY: rungnu
 rungnu:
