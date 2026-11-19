@@ -52,7 +52,11 @@ extern "C" {
 #define MS_INVALIDATE   4
 
 /* Flags for portable clock_gettime call. */
+#ifndef CLOCK_REALTIME
 #define CLOCK_REALTIME  0
+#endif
+
+#define clock_gettime win_clock_gettime
 
 void*   mmap(void *addr, size_t len, int prot, int flags, int fildes, ssize_t off);
 int     munmap(void *addr, size_t len);
