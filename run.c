@@ -214,15 +214,15 @@ void softmax(float* x, int size) {
     }
 }
 
-/*
+///*
 void cuda_matmul(float* xout, float* x, float* w, int n, int d);
 
 void matmul(float* xout, float* x, float* w, int n, int d) {
     cuda_matmul(xout, x, w, n, d);
 }
-*/
+//*/
 
-///*
+/*
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
@@ -236,7 +236,7 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
         xout[i] = val;
     }
 }
-//*/
+*/
 
 float* forward(Transformer* transformer, int token, int pos) {
 
