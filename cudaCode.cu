@@ -4,6 +4,9 @@
 
 #include "cuda_runtime.h"
 
+#include <nvtx3/nvToolsExt.h>
+#include <chrono>
+
 #define CHECK(call) do {                                 \
     cudaError_t err = (call);                            \
     if (err != cudaSuccess) {                            \
@@ -48,23 +51,36 @@ extern "C" void cuda_matmul(float* xout, float* x, float* w, int n, int d) {
 	const int inputVectorSize = n * sizeof(float);
 
     float* gpu_out, * gpu_x, * gpu_w;
+
+    nvtxRangePushA("1. Alloc");    
     CHECK(cudaMalloc((void**)&gpu_out, outputVectorSize));
 	CHECK(cudaMalloc((void**)&gpu_x, inputVectorSize));
 	CHECK(cudaMalloc((void**)&gpu_w, matrixSize));
-
+    nvtxRangePop();
+    
+    nvtxRangePushA("2. Transfer to GPU");
     CHECK(cudaMemcpy(gpu_x, x, inputVectorSize,
 		cudaMemcpyHostToDevice));
 	CHECK(cudaMemcpy(gpu_w, w, matrixSize,
 		cudaMemcpyHostToDevice));
+    nvtxRangePop();
 
     dim3 grid( ( (d + threadsPerBlock[0] - 1) / threadsPerBlock[0] ));
     dim3 tpb(threadsPerBlock[0], 1);
 
+    nvtxRangePushA("3. Compute");
     gpu_matmul << <grid, tpb >> > (gpu_out, gpu_x, gpu_w, n, d);
+
+    CHECK(cudaDeviceSynchronize());
+    nvtxRangePop();
 
     CHECK(cudaGetLastError());
 
+    nvtxRangePushA("4. Transfer from GPU");
     CHECK(cudaMemcpy(xout, gpu_out, outputVectorSize, cudaMemcpyDeviceToHost));
+    nvtxRangePop();
 
+    nvtxRangePushA("5. CUDA Free");
     CHECK(cudaFree(gpu_x)); CHECK(cudaFree(gpu_w)); CHECK(cudaFree(gpu_out));
+    nvtxRangePop();
 }
