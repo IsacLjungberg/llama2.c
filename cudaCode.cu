@@ -5,7 +5,6 @@
 #include "cuda_runtime.h"
 
 #include <nvtx3/nvToolsExt.h>
-#include <chrono>
 
 #define CHECK(call) do {                                 \
     cudaError_t err = (call);                            \
